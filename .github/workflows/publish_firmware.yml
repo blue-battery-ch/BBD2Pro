@@ -1,7 +1,9 @@
 name: Publish Firmware to Repo
 
 on:
-  workflow_dispatch:
+  release:
+    types: [published]  # Automatisch bei neuer Release
+  workflow_dispatch:     # Manuell auslösbar
 
 jobs:
   publish:
