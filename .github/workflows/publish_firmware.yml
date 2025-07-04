@@ -18,8 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq nodejs npm
-          npm install marked
+          sudo apt-get install -y jq pandoc
 
       - name: Get latest release info
         id: get_release
@@ -29,23 +28,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Parse release info
+      - name: Parse release info and convert Markdown to HTML
         id: parse_release
         run: |
           echo '${{ steps.get_release.outputs.data }}' > release.json
           TAG=$(jq -r .tag_name release.json)
           BODY=$(jq -r .body release.json)
+          HTML=$(echo "$BODY" | pandoc -f markdown -t html)
+
           ASSET_URL=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .browser_download_url' release.json)
           ASSET_NAME=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .name' release.json)
 
           echo "TAG=$TAG" >> $GITHUB_ENV
           echo "ASSET_URL=$ASSET_URL" >> $GITHUB_ENV
           echo "ASSET_NAME=$ASSET_NAME" >> $GITHUB_ENV
-          echo "$BODY" > release.md
+          echo "RELEASE_BODY<<EOF" >> $GITHUB_ENV
+          echo "$BODY" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "RELEASE_HTML<<EOF" >> $GITHUB_ENV
+          echo "$HTML" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Download firmware asset
-        run: |
-          curl -L "$ASSET_URL" -o firmware_temp.bin
+        run: curl -L "$ASSET_URL" -o firmware_temp.bin
 
       - name: Rename firmware if needed
         run: |
@@ -58,40 +63,27 @@ jobs:
           echo "FIRMWARE_NAME=$NEW_NAME" >> $GITHUB_ENV
           mv firmware_temp.bin "$NEW_NAME"
 
-      - name: Prepare firmware folder
+      - name: Prepare firmware folder and version.json
         run: |
           BRANCH=${{ github.event_name == 'workflow_dispatch' && 'test' || 'main' }}
-          git fetch origin $BRANCH || git checkout -b $BRANCH
-          git switch $BRANCH || git switch -c $BRANCH
+          git fetch origin $BRANCH || true
+          if git show-ref --quiet refs/heads/$BRANCH; then
+            git switch $BRANCH
+          else
+            git switch --create $BRANCH
+          fi
+
           mkdir -p firmware
-
-      - name: Generate version.json with HTML
-        run: |
-          # Konvertiere Markdown zu HTML mit NodeJS
-          node <<'EOF'
-          const fs = require('fs');
-          const marked = require('marked');
-
-          const tag = process.env.TAG;
-          const file = process.env.FIRMWARE_NAME;
-          const md = fs.existsSync('release.md') ? fs.readFileSync('release.md', 'utf8') : '';
-          const html = marked.parse(md);
-
-          const versionJson = {
-            version: tag,
-            file: file,
-            html: html
-          };
-
-          fs.writeFileSync('firmware/version.json', JSON.stringify(versionJson, null, 2));
-          EOF
-
           cp "$FIRMWARE_NAME" firmware/
+
+          echo "{ \"version\": \"$TAG\", \"file\": \"$FIRMWARE_NAME\", \"html\": $(echo "$RELEASE_HTML" | jq -Rs .) }" > firmware/version.json
 
       - name: Commit and push
         run: |
+          BRANCH=${{ github.event_name == 'workflow_dispatch' && 'test' || 'main' }}
           git config user.name "github-actions"
           git config user.email "actions@github.com"
+
           git add firmware/
           git commit -m "Add firmware $FIRMWARE_NAME for version $TAG" || echo "Nothing to commit"
-          git push --force-with-lease origin HEAD
+          git push origin $BRANCH
