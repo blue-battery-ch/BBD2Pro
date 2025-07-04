@@ -1,92 +1,76 @@
-name: Publish Firmware to Repo
+name: Copy latest release firmware
 
 on:
+  workflow_dispatch: {}
   release:
-    types: [published]  # Automatisch bei neuer Release
-  workflow_dispatch:     # Manuell auslösbar
+    types: [released]
 
 jobs:
-  publish:
+  fetch-and-push-firmware:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
 
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+      - name: Check out the repo
+        uses: actions/checkout@v4
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: 20
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
 
-    - name: Install Dependencies (marked)
-      run: npm install marked
+      - name: Get latest release info
+        id: get_release
+        uses: octokit/request-action@v2.x
+        with:
+          route: GET /repos/${{ github.repository }}/releases/latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Get latest release info
-      id: release
-      uses: octokit/request-action@v2.x
-      with:
-        route: GET /repos/${{ github.repository }}/releases/latest
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Parse release info
+        id: parse_release
+        run: |
+          echo '${{ steps.get_release.outputs.data }}' > release.json
+          TAG=$(jq -r .tag_name release.json)
+          BODY=$(jq -r .body release.json)
+          ASSET_URL=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .browser_download_url' release.json)
+          ASSET_NAME=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .name' release.json)
 
-    - name: Extract release info
-      id: extract
-      run: |
-        echo "${{ steps.release.outputs.data }}" > release.json
-        TAG=$(jq -r .tag_name release.json)
-        NAME=$(jq -r .name release.json)
-        BODY=$(jq -r .body release.json)
-        echo "RELEASE_TAG=${TAG}" >> $GITHUB_ENV
-        echo "RELEASE_NAME=${NAME}" >> $GITHUB_ENV
-        echo "RELEASE_BODY<<EOF" >> $GITHUB_ENV
-        echo "${BODY}" >> $GITHUB_ENV
-        echo "EOF" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "BODY<<EOF" >> $GITHUB_ENV
+          echo "$BODY" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "ASSET_URL=$ASSET_URL" >> $GITHUB_ENV
+          echo "ASSET_NAME=$ASSET_NAME" >> $GITHUB_ENV
 
-    - name: Download firmware asset
-      run: |
-        URL=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .url' release.json)
-        FILENAME=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .name' release.json)
+      - name: Download firmware asset
+        run: |
+          curl -L "$ASSET_URL" -o firmware_temp.bin
 
-        mkdir -p firmware
+      - name: Rename firmware if needed
+        run: |
+          PRODUCT=$(basename ${{ github.repository }})
+          if [ "$ASSET_NAME" == "firmware.bin" ]; then
+            NEW_NAME="${PRODUCT}_${TAG}.bin"
+          else
+            NEW_NAME="$ASSET_NAME"
+          fi
+          echo "FIRMWARE_NAME=$NEW_NAME" >> $GITHUB_ENV
+          mv firmware_temp.bin "$NEW_NAME"
 
-        curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-             -H "Accept: application/octet-stream" \
-             "$URL" -o firmware.tmp.bin
+      - name: Prepare firmware folder
+        run: |
+          BRANCH=${{ github.event_name == 'workflow_dispatch' && 'test' || 'main' }}
+          git fetch origin $BRANCH || git checkout -b $BRANCH
+          mkdir -p firmware
+          cp "$FIRMWARE_NAME" firmware/
+          echo "{ \"version\": \"$TAG\", \"file\": \"$FIRMWARE_NAME\" }" > firmware/version.json
 
-        PRODUCT=$(basename "${GITHUB_REPOSITORY}")
-        VERSION=${RELEASE_TAG#v}
-
-        if [ "$FILENAME" = "firmware.bin" ]; then
-          FINAL_NAME="${PRODUCT}_${VERSION}.bin"
-        else
-          FINAL_NAME="$FILENAME"
-        fi
-
-        mv firmware.tmp.bin "firmware/$FINAL_NAME"
-
-        echo "FIRMWARE_NAME=$FINAL_NAME" >> $GITHUB_ENV
-
-    - name: Generate version.json and HTML
-      run: |
-        echo "{\"version\":\"${RELEASE_TAG#v}\",\"filename\":\"$FIRMWARE_NAME\"}" > firmware/version.json
-        echo "${RELEASE_BODY}" > firmware/release.md
-        node -e "import('marked').then(m => require('fs').writeFileSync('firmware/release.html', m.marked(process.env.RELEASE_BODY)))"
-
-    - name: Commit and Push
-      run: |
-        BRANCH="main"
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-          BRANCH="test"
-        fi
-
-        git config user.name "github-actions"
-        git config user.email "github-actions@users.noreply.github.com"
-
-        git fetch origin $BRANCH || git checkout --orphan $BRANCH
-
-        git switch $BRANCH || git checkout -b $BRANCH
-        mkdir -p firmware
-
-        git add firmware/
-        git commit -m "Add firmware $FIRMWARE_NAME from release $RELEASE_TAG" || echo "Nothing to commit"
-        git push origin $BRANCH
+      - name: Commit and push
+        run: |
+          BRANCH=${{ github.event_name == 'workflow_dispatch' && 'test' || 'main' }}
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git checkout $BRANCH || git checkout -b $BRANCH
+          git add firmware/
+          git commit -m "Add firmware $FIRMWARE_NAME for version $TAG" || echo "Nothing to commit"
+          git push origin $BRANCH
