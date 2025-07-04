@@ -62,8 +62,11 @@ jobs:
         run: |
           BRANCH=${{ github.event_name == 'workflow_dispatch' && 'test' || 'main' }}
           git fetch origin $BRANCH || git checkout -b $BRANCH
+          git switch $BRANCH || git switch -c $BRANCH
           mkdir -p firmware
 
+      - name: Generate version.json with HTML
+        run: |
           # Konvertiere Markdown zu HTML mit NodeJS
           node <<'EOF'
           const fs = require('fs');
@@ -87,10 +90,8 @@ jobs:
 
       - name: Commit and push
         run: |
-          BRANCH=${{ github.event_name == 'workflow_dispatch' && 'test' || 'main' }}
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git checkout $BRANCH || git checkout -b $BRANCH
           git add firmware/
           git commit -m "Add firmware $FIRMWARE_NAME for version $TAG" || echo "Nothing to commit"
-          git push origin $BRANCH
+          git push --force-with-lease origin HEAD
