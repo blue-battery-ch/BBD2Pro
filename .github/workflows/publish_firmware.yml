@@ -83,7 +83,7 @@ jobs:
           BRANCH=${{ github.event_name == 'workflow_dispatch' && 'test' || 'main' }}
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-
+          git switch $BRANCH || git switch -c $BRANCH
           git add firmware/
           git commit -m "Add firmware $FIRMWARE_NAME for version $TAG" || echo "Nothing to commit"
-          git push origin $BRANCH
+          git push --force-with-lease origin $BRANCH
