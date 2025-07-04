@@ -38,6 +38,7 @@ jobs:
 
           ASSET_URL=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .browser_download_url' release.json)
           ASSET_NAME=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .name' release.json)
+          ASSET_ID=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .id' release.json)
 
           echo "TAG=$TAG" >> $GITHUB_ENV
           echo "ASSET_URL=$ASSET_URL" >> $GITHUB_ENV
@@ -48,6 +49,7 @@ jobs:
           echo "RELEASE_HTML<<EOF" >> $GITHUB_ENV
           echo "$HTML" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
+          echo "ASSET_ID=$ASSET_ID" >> $GITHUB_ENV
 
       - name: Download firmware asset
         run: curl -L "$ASSET_URL" -o firmware_temp.bin
@@ -87,3 +89,13 @@ jobs:
           git add firmware/
           git commit -m "Add firmware $FIRMWARE_NAME for version $TAG" || echo "Nothing to commit"
           git push --force-with-lease origin $BRANCH
+
+      - name: Rename release asset if needed
+        if: env.ASSET_NAME == 'firmware.bin'
+        run: |
+          echo "Renaming firmware.bin in release to $FIRMWARE_NAME"
+          curl -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ env.ASSET_ID }} \
+            -d '{"name":"'"${FIRMWARE_NAME}"'"}'
