@@ -1,0 +1,107 @@
+name: Build and Publish Firmware Info
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node for markdown conversion
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install marked package
+        run: npm install marked
+
+      - name: Fetch latest release info
+        id: get_release
+        run: |
+          gh release view --json tagName,name,body,assets \
+            | tee release.json
+
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse release JSON and download firmware
+        id: parse_and_download
+        run: |
+          set -e
+          tag=$(jq -r .tagName release.json)
+          version=${tag#v}
+          name=$(jq -r .name release.json)
+          body=$(jq -r .body release.json)
+          product=$(basename "${{ github.repository }}")
+
+          asset_url=""
+          asset_name=""
+          for row in $(jq -c '.assets[]' release.json); do
+            name=$(echo "$row" | jq -r .name)
+            url=$(echo "$row" | jq -r .url)
+            if [[ "$name" == *.bin ]]; then
+              asset_name="$name"
+              asset_url="$url"
+              break
+            fi
+          done
+
+          if [ -z "$asset_url" ]; then
+            echo "No .bin firmware asset found"
+            exit 1
+          fi
+
+          curl -sL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "$asset_url" -o downloaded.bin
+
+          if [[ "$asset_name" == "firmware.bin" ]]; then
+            out_name="${product}_${version}.bin"
+          else
+            out_name="$asset_name"
+          fi
+
+          mkdir -p firmware_out
+          mv downloaded.bin "firmware_out/$out_name"
+
+          # Export env for next steps
+          echo "version=$version" >> $GITHUB_ENV
+          echo "product=$product" >> $GITHUB_ENV
+          echo "firmware_filename=$out_name" >> $GITHUB_ENV
+          echo "$body" > release.md
+
+      - name: Convert markdown to HTML
+        run: |
+          npx marked release.md > release.html
+
+      - name: Create version.json
+        run: |
+          jq -n \
+            --arg version "$version" \
+            --arg info "$(cat release.html | jq -Rs .)" \
+            '{ version: $version, info: ($info | fromjson) }' > firmware_out/version.json
+
+      - name: Copy to repo folder
+        run: |
+          dest_dir=""
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            dest_dir="test/firmware"
+          else
+            dest_dir="main/firmware"
+          fi
+          mkdir -p "$dest_dir"
+          cp firmware_out/* "$dest_dir/"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add main/firmware test/firmware || true
+          git commit -m "Add firmware ${{ env.version }} for ${{ env.product }}" || echo "Nothing to commit"
+          git push
